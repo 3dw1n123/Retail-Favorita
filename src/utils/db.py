@@ -59,7 +59,6 @@ def test_connection()-> bool:
         engine = get_engine()
         with engine.connect() as conn:
             result = conn.execute(text("SELECT 'hello world'"))
-            print(f"resultado: {result}")
             version = result.fetchone()[0]
             logger.info(f"Connected to: {version}")
             return True
@@ -68,4 +67,3 @@ def test_connection()-> bool:
         logger.error(f"Connection test fail: {e}")
         return False
     
-print(test_connection())

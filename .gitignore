@@ -29,7 +29,7 @@ wheels/
 # Environment variables
 .env
 
-# Data (NO subir CSVs grandes)
+# Data
 data/raw/*
 data/processed/*
 !data/raw/.gitkeep
@@ -55,3 +55,10 @@ mlartifacts/
 
 # Logs
 *.log
+
+# Test files
+test_*.py
+*_test.py
+debug*.py
+scratch*.py
+temp*.py
