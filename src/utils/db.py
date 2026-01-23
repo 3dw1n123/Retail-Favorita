@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from logger import setup_logger
+from src.utils.logger import setup_logger
 
 load_dotenv()
 logger = setup_logger(__name__)
@@ -36,7 +36,7 @@ def get_engine()->Engine:
     )
     return engine
 
-
+@contextmanager
 def get_connection()-> Generator:
     conn = None
     try:
