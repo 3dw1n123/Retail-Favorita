@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS items (
     item_nbr INTEGER PRIMARY KEY,
     family VARCHAR(100) NOT NULL,
     class INTEGER NOT NULL,
-    perishable BOOLEAN
+    perishable SMALLINT NOT NULL CHECK (perishable IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
