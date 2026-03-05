@@ -65,26 +65,45 @@ DROP MATERIALIZED VIEW IF EXISTS train_clean CASCADE;
 
 CREATE MATERIALIZED VIEW train_clean AS
 -- Identity sales with non-existent stores or items 
-WITH valid_sales AS (
+WITH
+    combined_data AS (
+    SELECT 
+        id, 
+        date, 
+        store_nbr, 
+        item_nbr, 
+        unit_sales, 
+        onpromotion
+    FROM train
+    WHERE unit_sales > 0
+    
+    UNION ALL
+    
+    SELECT 
+        id, 
+        date, 
+        store_nbr, 
+        item_nbr, 
+        NULL AS unit_sales,
+        onpromotion
+    FROM test
+), 
+    
+    valid_sales AS (
     SELECT
-        train.id,
-        train.date,
-        train.store_nbr,
-        train.item_nbr,
-        train.unit_sales,
-        train.onpromotion,
+        combined_data.id,
+        combined_data.date,
+        combined_data.store_nbr,
+        combined_data.item_nbr,
+        combined_data.unit_sales,
+        combined_data.onpromotion,
         CASE WHEN stores.store_nbr IS NULL THEN TRUE ELSE FALSE END AS is_orphan_store,
         CASE WHEN items.item_nbr IS NULL THEN TRUE ELSE FALSE END AS is_orphan_item
-    FROM train
+    FROM combined_data
     LEFT JOIN stores
-    ON stores.store_nbr = train.store_nbr
+    ON stores.store_nbr = combined_data.store_nbr
     LEFT JOIN items
-    ON items.item_nbr = train.item_nbr
-
-    -- Discard refunds
-    WHERE
-        train.unit_sales>0
-
+    ON items.item_nbr = combined_data.item_nbr
 )
 
 
@@ -160,6 +179,152 @@ create_holidays_clean_view = """
  """
 
 
+#Master training table
+
+create_master_training_data_view = """ 
+    DROP MATERIALIZED VIEW IF EXISTS master_training_data CASCADE;
+
+    CREATE MATERIALIZED VIEW master_training_data AS
+    WITH base_data AS (
+        --Unifying data from base tables
+        SELECT
+            train_clean.id,
+            train_clean.date,
+            train_clean.store_nbr,
+            train_clean.item_nbr,
+            train_clean.unit_sales,
+            train_clean.onpromotion,
+            stores.city,
+            stores.state,
+            stores.type AS store_type,
+            stores.cluster AS store_cluster,
+            items.family AS item_family,
+            items.class AS item_class,
+            items.perishable
+        FROM train_clean
+        LEFT JOIN stores
+        ON train_clean.store_nbr = stores.store_nbr
+        LEFT JOIN items
+        ON train_clean.item_nbr = items.item_nbr
+    ),
+
+
+    data_with_oil AS (
+        --Add oil prices
+        SELECT
+            base_data.*,
+            oil_clean.oil_price,
+            oil_clean.is_imputed AS oil_is_imputed
+        FROM base_data
+        LEFT JOIN oil_clean
+        ON base_data.date = oil_clean.date
+        ),
+
+
+    data_with_holidays AS (
+        -- Add holidays by locale type
+        SELECT
+            data_with_oil.*,
+            holidays_clean.type AS holiday_type,
+            holidays_clean.description AS holiday_description,
+            CASE WHEN holidays_clean.date IS NOT NULL THEN TRUE ELSE FALSE END AS is_holiday
+        FROM data_with_oil
+        LEFT JOIN holidays_clean
+        ON data_with_oil.date = holidays_clean.date
+        AND (
+            holidays_clean.locale = 'National'
+            OR (holidays_clean.locale = 'Regional' AND holidays_clean.locale_name = data_with_oil.state)
+            OR (holidays_clean.locale = 'Local' AND holidays_clean.locale_name = data_with_oil.city)
+            )
+    
+    ),
+
+    final_features AS (
+        --Add time based features
+        SELECT
+            *,
+            EXTRACT(DOW FROM date) AS day_of_week,
+            EXTRACT(MONTH FROM date) AS month,
+            EXTRACT(DAY FROM date) AS day_of_month,
+            EXTRACT(YEAR FROM date) AS year,
+            EXTRACT(WEEK FROM date) AS week_of_year,
+
+            CASE
+                WHEN EXTRACT(DOW FROM date) IN (0,6) THEN TRUE 
+                ELSE FALSE
+            END AS is_weekend,
+
+            
+            CASE
+                WHEN EXTRACT(DAY FROM date) = 15 
+                    OR date = (DATE_TRUNC('month', date) + INTERVAL '1 month - 1 day')::DATE
+                THEN TRUE 
+                ELSE FALSE
+            END AS is_payday,
+
+            CASE
+                WHEN EXTRACT(DAY FROM date)<=7
+                THEN TRUE
+                ELSE FALSE
+            END AS is_month_start,
+
+            CASE
+                WHEN EXTRACT(DAY FROM date)>=24
+                THEN TRUE
+                ELSE FALSE
+            END AS is_month_end
+
+        FROM data_with_holidays
+    )
+
+    SELECT 
+        id,
+        date,
+        store_nbr,
+        item_nbr,
+
+        unit_sales,
+
+        onpromotion,
+        city,
+        state,
+        store_type,
+        store_cluster,
+
+        item_family,
+        item_class,
+        perishable,
+
+        oil_price,
+        oil_is_imputed,
+
+        is_holiday,
+        holiday_type,
+        holiday_description,
+
+        year,
+        month,
+        week_of_year,
+        day_of_month,
+        day_of_week,
+
+        is_weekend,
+        is_payday,
+        is_month_start,
+        is_month_end
+    
+    FROM final_features
+    ORDER BY date,store_nbr,item_nbr;
+
+    --Index
+    CREATE INDEX idx_master_composite ON master_training_data(date, store_nbr, item_nbr);
+
+"""
+
+
+
+
+
 
 
 # Validation queries
@@ -186,7 +351,8 @@ validate_train_clean = """
         SUM(CASE WHEN has_integrity_issues THEN 1 ELSE 0 END) as integrity_issues,
         SUM(CASE WHEN is_orphan_store THEN 1 ELSE 0 END) as orphan_stores,
         SUM(CASE WHEN is_orphan_item THEN 1 ELSE 0 END) as orphan_items
-    FROM train_clean;
+    FROM train_clean
+    WHERE date<'2017-08-16';
 """
 
 validate_holidays_clean = """ 
@@ -201,3 +367,67 @@ validate_holidays_clean = """
     FROM holidays_clean;
 
 """
+
+#Master training validations
+
+
+validate_master_data = """ 
+    SELECT
+        COUNT(*) as total_rows,
+        COUNT(DISTINCT date) as unique_dates,
+        COUNT(DISTINCT store_nbr) as unique_stores,
+        COUNT(DISTINCT item_nbr) as unique_items,
+        MIN(date) as min_date,
+        MAX(date) as max_date,
+        ROUND(AVG(unit_sales), 2) as avg_sales,
+        ROUND(AVG(oil_price), 2) as avg_oil_price,
+        SUM(CASE WHEN onpromotion THEN 1 ELSE 0 END) as promotion_count,
+        SUM(CASE WHEN is_holiday THEN 1 ELSE 0 END) as holiday_count,
+        SUM(CASE WHEN is_weekend THEN 1 ELSE 0 END) as weekend_count,
+        SUM(CASE WHEN is_payday THEN 1 ELSE 0 END) as payday_count,
+        COUNT(DISTINCT item_family) as unique_families,
+        COUNT(DISTINCT store_type) as unique_store_types
+        FROM master_training_data
+        WHERE date<'2017-08-16';
+
+"""
+
+holiday_distribution = """
+    SELECT 
+        holiday_type,
+        COUNT(*) as occurrences,
+        COUNT(DISTINCT date) as unique_dates,
+        ROUND(AVG(unit_sales), 2) as avg_sales_on_holiday
+    FROM master_training_data
+    WHERE is_holiday = TRUE
+    AND date<'2017-08-16'
+    GROUP BY holiday_type
+    ORDER BY occurrences DESC;
+
+    """
+
+payday_impact_preview = """
+    SELECT 
+        is_payday,
+        COUNT(*) as transactions,
+        ROUND(AVG(unit_sales), 2) as avg_sales,
+        ROUND(STDDEV(unit_sales), 2) as std_sales
+    FROM master_training_data
+    WHERE date<'2017-08-16'
+    GROUP BY is_payday
+    ORDER BY is_payday DESC;
+
+    """
+
+top_selling_families = """
+    SELECT 
+        item_family,
+        COUNT(*) as transactions,
+        ROUND(SUM(unit_sales), 2) as total_sales
+    FROM master_training_data
+    WHERE date<'2017-08-16'
+    GROUP BY item_family
+    ORDER BY total_sales DESC
+    LIMIT 5;
+
+    """
